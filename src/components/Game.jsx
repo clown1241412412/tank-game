@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Tank from './Tank';
 import Bullet from './Bullet';
+import Obstacle from './Obstacle';
 
 const TANK_SPEED = 3;
 const ROTATION_SPEED = 3;
@@ -10,8 +11,14 @@ const RELOAD_TIME = 500; // ms
 const ENEMY_RELOAD_TIME = 2000;
 const PLAYER_COLOR = '#4a90e2';
 const ENEMY_COLOR = '#e67e22'; // Orange
+const OBSTACLE_SIZE = 40; // Slightly smaller than tank (which is 60x40)
 
 const toRad = deg => deg * Math.PI / 180;
+
+// Helper to check collision between a point (x,y) and a circle (cx, cy, r)
+const checkCircleCollision = (x1, y1, r1, x2, y2, r2) => {
+    return Math.hypot(x1 - x2, y1 - y2) < (r1 + r2);
+};
 
 const Game = () => {
     // We use a ref for the game logic state to avoid closure staleness in the loop
@@ -27,6 +34,7 @@ const Game = () => {
         },
         enemies: [], // { id, x, y, bodyRotation, turretRotation, hp, maxHp, lastShotTime }
         bullets: [], // { id, x, y, rotation, owner: 'player' | 'enemy', color }
+        obstacles: [], // { id, x, y, size }
         lastShotTime: 0,
         gameOver: false
     });
@@ -35,6 +43,27 @@ const Game = () => {
     const [renderState, setRenderState] = useState(gameStateRef.current);
 
     const keys = useRef({});
+
+    // Initialize Obstacles on Mount
+    useEffect(() => {
+        const obstacles = [];
+        for (let i = 0; i < 3; i++) {
+            let x, y;
+            // Ensure obstacles don't spawn too close to player start
+            do {
+                x = Math.random() * (window.innerWidth - 100) + 50;
+                y = Math.random() * (window.innerHeight - 100) + 50;
+            } while (Math.hypot(x - window.innerWidth / 2, y - window.innerHeight / 2) < 200);
+
+            obstacles.push({
+                id: `obs-${i}`,
+                x,
+                y,
+                size: OBSTACLE_SIZE
+            });
+        }
+        gameStateRef.current.obstacles = obstacles;
+    }, []);
 
     // Input Handling
     useEffect(() => {
@@ -65,13 +94,16 @@ const Game = () => {
             const input = keys.current;
 
             // --- Player Movement ---
+            let newTx = state.player.x;
+            let newTy = state.player.y;
+
             if (input['KeyW']) {
-                state.player.x += Math.cos(toRad(state.player.bodyRotation - 90)) * TANK_SPEED;
-                state.player.y += Math.sin(toRad(state.player.bodyRotation - 90)) * TANK_SPEED;
+                newTx += Math.cos(toRad(state.player.bodyRotation - 90)) * TANK_SPEED;
+                newTy += Math.sin(toRad(state.player.bodyRotation - 90)) * TANK_SPEED;
             }
             if (input['KeyS']) {
-                state.player.x -= Math.cos(toRad(state.player.bodyRotation - 90)) * TANK_SPEED;
-                state.player.y -= Math.sin(toRad(state.player.bodyRotation - 90)) * TANK_SPEED;
+                newTx -= Math.cos(toRad(state.player.bodyRotation - 90)) * TANK_SPEED;
+                newTy -= Math.sin(toRad(state.player.bodyRotation - 90)) * TANK_SPEED;
             }
             if (input['KeyA']) {
                 state.player.bodyRotation -= ROTATION_SPEED;
@@ -79,6 +111,34 @@ const Game = () => {
             if (input['KeyD']) {
                 state.player.bodyRotation += ROTATION_SPEED;
             }
+
+            // Apply Player Movement with Obstacle Collision Check
+            let playerCollided = false;
+            // Approximate tank size radius ~ 25, obstacle size radius ~ 20
+            const tankRadius = 25;
+            const obsRadius = 20;
+
+            state.obstacles.forEach(obs => {
+                if (checkCircleCollision(newTx, newTy, tankRadius, obs.x, obs.y, obsRadius)) {
+                    playerCollided = true;
+                    // Push back logic: don't update position, or slightly buffer
+                    // Simple logic: just don't move into it.
+                }
+            });
+
+            if (!playerCollided) {
+                state.player.x = newTx;
+                state.player.y = newTy;
+            } else {
+                // Optional: Push back effect (bounce slightly)
+                state.player.x -= Math.cos(toRad(state.player.bodyRotation - 90)) * 2;
+                state.player.y -= Math.sin(toRad(state.player.bodyRotation - 90)) * 2;
+            }
+
+            // Constrain Player to screen
+            state.player.x = Math.max(20, Math.min(window.innerWidth - 20, state.player.x));
+            state.player.y = Math.max(20, Math.min(window.innerHeight - 20, state.player.y));
+
 
             // Player Turret
             if (input['KeyJ']) {
@@ -112,24 +172,42 @@ const Game = () => {
             if (state.enemies.length < maxEnemies) {
                 // Spawn away from player
                 let spawnX, spawnY;
-                do {
+                let validSpawn = false;
+
+                // Try to find a valid spawn point (not on player, not on obstacle)
+                let attempts = 0;
+                while (!validSpawn && attempts < 10) {
                     spawnX = Math.random() * window.innerWidth;
                     spawnY = Math.random() * window.innerHeight;
-                } while (Math.hypot(spawnX - state.player.x, spawnY - state.player.y) < 300);
 
-                const difficultyMultiplier = 1 + (state.player.score * 0.1); // +10% stats per kill
+                    const distToPlayer = Math.hypot(spawnX - state.player.x, spawnY - state.player.y);
+                    let distToObs = 1000;
+                    state.obstacles.forEach(obs => {
+                        const d = Math.hypot(spawnX - obs.x, spawnY - obs.y);
+                        if (d < distToObs) distToObs = d;
+                    });
 
-                state.enemies.push({
-                    id: now + Math.random(),
-                    x: spawnX,
-                    y: spawnY,
-                    bodyRotation: Math.random() * 360,
-                    turretRotation: Math.random() * 360,
-                    hp: 100 * difficultyMultiplier,
-                    maxHp: 100 * difficultyMultiplier,
-                    damage: 10 * difficultyMultiplier,
-                    lastShotTime: 0
-                });
+                    if (distToPlayer > 300 && distToObs > 50) {
+                        validSpawn = true;
+                    }
+                    attempts++;
+                }
+
+                if (validSpawn) {
+                    const difficultyMultiplier = 1 + (state.player.score * 0.1); // +10% stats per kill
+
+                    state.enemies.push({
+                        id: now + Math.random(),
+                        x: spawnX,
+                        y: spawnY,
+                        bodyRotation: Math.random() * 360,
+                        turretRotation: Math.random() * 360,
+                        hp: 100 * difficultyMultiplier,
+                        maxHp: 100 * difficultyMultiplier,
+                        damage: 10 * difficultyMultiplier,
+                        lastShotTime: 0
+                    });
+                }
             }
 
             // --- Enemy AI ---
@@ -146,9 +224,29 @@ const Game = () => {
                 else if (angleDiff < -2) enemy.bodyRotation -= 1;
 
                 // Move if far
+                let enemyMove = false;
                 if (dist > 200) {
-                    enemy.x += Math.cos(toRad(enemy.bodyRotation - 90)) * (TANK_SPEED * 0.5);
-                    enemy.y += Math.sin(toRad(enemy.bodyRotation - 90)) * (TANK_SPEED * 0.5);
+                    const nextEx = enemy.x + Math.cos(toRad(enemy.bodyRotation - 90)) * (TANK_SPEED * 0.5);
+                    const nextEy = enemy.y + Math.sin(toRad(enemy.bodyRotation - 90)) * (TANK_SPEED * 0.5);
+
+                    // Enemy Obstacle Collision
+                    let enemyCollided = false;
+                    state.obstacles.forEach(obs => {
+                        if (checkCircleCollision(nextEx, nextEy, tankRadius, obs.x, obs.y, obsRadius)) {
+                            enemyCollided = true;
+                        }
+                    });
+
+                    if (!enemyCollided) {
+                        enemy.x = nextEx;
+                        enemy.y = nextEy;
+                        enemyMove = true;
+                    }
+                }
+
+                // If stuck on obstacle, simple avoidance (random rotation adjustment)
+                if (!enemyMove && dist > 200) {
+                    enemy.bodyRotation += 5;
                 }
 
                 // Turret aims at player
@@ -173,46 +271,59 @@ const Game = () => {
             });
 
             // --- Update Bullets ---
-            state.bullets = state.bullets.filter(b =>
-                b.x >= 0 && b.x <= window.innerWidth &&
-                b.y >= 0 && b.y <= window.innerHeight
-            ).map(b => ({
+            // Filter bullets out of bounds or matching obstacle collision
+            // We'll handle obstacle collision in the loop below
+            state.bullets = state.bullets.map(b => ({
                 ...b,
                 x: b.x + Math.cos(toRad(b.rotation - 90)) * BULLET_SPEED,
                 y: b.y + Math.sin(toRad(b.rotation - 90)) * BULLET_SPEED
-            }));
+            })).filter(b =>
+                b.x >= 0 && b.x <= window.innerWidth &&
+                b.y >= 0 && b.y <= window.innerHeight
+            );
+
 
             // --- Collision Detection ---
-            // Bullet vs Tanks
-            const tankRadius = 25; // Approx hit radius
+            // Bullet vs Tanks & Obstacles
+            // const tankRadius = 25; // defined above
 
             // Iterate backwards to remove bullets safely
             for (let i = state.bullets.length - 1; i >= 0; i--) {
                 const b = state.bullets[i];
                 let hit = false;
 
-                // Player Hit?
-                if (b.owner === 'enemy') {
-                    if (Math.hypot(b.x - state.player.x, b.y - state.player.y) < tankRadius) {
-                        state.player.hp -= b.damage || 10;
+                // Obstacle Hit?
+                for (const obs of state.obstacles) {
+                    if (Math.hypot(b.x - obs.x, b.y - obs.y) < obsRadius + 5) { // +5 for bullet size approx
                         hit = true;
-                        if (state.player.hp <= 0) {
-                            state.gameOver = true;
-                        }
+                        break;
                     }
                 }
-                // Enemy Hit?
-                else if (b.owner === 'player') {
-                    for (let j = state.enemies.length - 1; j >= 0; j--) {
-                        const enemy = state.enemies[j];
-                        if (Math.hypot(b.x - enemy.x, b.y - enemy.y) < tankRadius) {
-                            enemy.hp -= 20; // Player damage
+
+                if (!hit) {
+                    // Player Hit?
+                    if (b.owner === 'enemy') {
+                        if (Math.hypot(b.x - state.player.x, b.y - state.player.y) < tankRadius) {
+                            state.player.hp -= b.damage || 10;
                             hit = true;
-                            if (enemy.hp <= 0) {
-                                state.enemies.splice(j, 1);
-                                state.player.score += 1;
+                            if (state.player.hp <= 0) {
+                                state.gameOver = true;
                             }
-                            break; // Bullet hits only one enemy
+                        }
+                    }
+                    // Enemy Hit?
+                    else if (b.owner === 'player') {
+                        for (let j = state.enemies.length - 1; j >= 0; j--) {
+                            const enemy = state.enemies[j];
+                            if (Math.hypot(b.x - enemy.x, b.y - enemy.y) < tankRadius) {
+                                enemy.hp -= 20; // Player damage
+                                hit = true;
+                                if (enemy.hp <= 0) {
+                                    state.enemies.splice(j, 1);
+                                    state.player.score += 1;
+                                }
+                                break; // Bullet hits only one enemy
+                            }
                         }
                     }
                 }
@@ -245,6 +356,11 @@ const Game = () => {
 
     return (
         <div className="game-container" style={{ width: '100vw', height: '100vh', overflow: 'hidden', position: 'relative' }}>
+            {/* Obstacles */}
+            {renderState.obstacles.map(obs => (
+                <Obstacle key={obs.id} {...obs} />
+            ))}
+
             {/* Player */}
             <Tank {...renderState.player} color={PLAYER_COLOR} />
 
